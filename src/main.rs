@@ -1,15 +1,17 @@
 use anyhow::{Result, anyhow};
+use pinyin::ToPinyinMulti;
+use reqwest;
+use scraper;
 use std::env;
 use std::fmt;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::process;
-use reqwest;
-use scraper;
 
 #[derive(Debug)]
 struct HanziRow {
 	hanzi: String,
+	pinyin: String,
 	hsk_lvl: u32,
 	gs_num: u32,
 	freq: u32,	
@@ -17,7 +19,7 @@ struct HanziRow {
 
 impl fmt::Display for HanziRow {
 	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-		write!(f, "{}	{}	{}	{}\n", self.hanzi, self.hsk_lvl, self.gs_num, self.freq)
+		write!(f, "{}	{}	{}	{}	{}\n", self.hanzi, self.pinyin, self.hsk_lvl, self.gs_num, self.freq)
 	}
 }
 
@@ -40,7 +42,7 @@ impl Config {
 		let _ = OpenOptions::new().write(true).create(true).open(&output_file_path)?;
 
 		// hardcode these for now
-		let max_page: u32 = 101;
+		let max_page: u32 = 2;
 		let starting_page: u32 = 1;
 		let base_url: String = String::from("http://hanzidb.org/character-list/by-frequency?page=");
 
@@ -123,6 +125,7 @@ fn scrape(config: Config) -> Result<u32> {
 		for row in html.select(&selectors.tr) {
 			let mut data = row.select(&selectors.td);
 			let hanzi: String;
+			let pinyin: String;
 			let hsk_lvl: u32;
 			let gs_num: u32;
 			let freq: u32;
@@ -194,9 +197,21 @@ fn scrape(config: Config) -> Result<u32> {
 				None => continue,
 			}
 
+			// get pinyin readings
+			if let Some(x) = hanzi.as_str().to_pinyin_multi().next() {
+				if let Some(p) = x {
+					let readings: Vec<&str> = p.into_iter().map(|x| x.with_tone()).collect();
+					pinyin = readings.join(", ");
+				} else { return Err(anyhow!("Failed to get pinyin")); }
+			} else { return Err(anyhow!("Failed to get pinyin")); }
+
+			// get traditional character
+
+
 			// write data to file
 			let data = HanziRow {
 				hanzi,
+				pinyin,
 				hsk_lvl,
 				gs_num,
 				freq,
