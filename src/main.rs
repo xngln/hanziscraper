@@ -1,4 +1,5 @@
 use anyhow::{Result, anyhow};
+use opencc::OpenCC;
 use pinyin::ToPinyinMulti;
 use reqwest;
 use scraper;
@@ -11,6 +12,7 @@ use std::process;
 #[derive(Debug)]
 struct HanziRow {
 	hanzi: String,
+	trad: String,
 	pinyin: String,
 	hsk_lvl: u32,
 	gs_num: u32,
@@ -19,7 +21,7 @@ struct HanziRow {
 
 impl fmt::Display for HanziRow {
 	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-		write!(f, "{}	{}	{}	{}	{}\n", self.hanzi, self.pinyin, self.hsk_lvl, self.gs_num, self.freq)
+		write!(f, "{}	{}	{}	{}	{}	{}\n", self.hanzi, self.trad, self.pinyin, self.hsk_lvl, self.gs_num, self.freq)
 	}
 }
 
@@ -113,6 +115,7 @@ fn scrape(config: Config) -> Result<u32> {
 								 .open(config.output_file_path)?;
 
 	let selectors = Selectors::new()?;
+	let cc= OpenCC::new("s2t.json");
 
 	// loop through each 'page' of the table
 	for page in config.starting_page..config.max_page {
@@ -125,6 +128,7 @@ fn scrape(config: Config) -> Result<u32> {
 		for row in html.select(&selectors.tr) {
 			let mut data = row.select(&selectors.td);
 			let hanzi: String;
+			let trad: String;
 			let pinyin: String;
 			let hsk_lvl: u32;
 			let gs_num: u32;
@@ -206,11 +210,12 @@ fn scrape(config: Config) -> Result<u32> {
 			} else { return Err(anyhow!("Failed to get pinyin")); }
 
 			// get traditional character
-
+			trad = cc.convert(&hanzi);
 
 			// write data to file
 			let data = HanziRow {
 				hanzi,
+				trad,
 				pinyin,
 				hsk_lvl,
 				gs_num,
