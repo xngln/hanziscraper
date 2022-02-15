@@ -3,6 +3,7 @@ use opencc::OpenCC;
 use pinyin::ToPinyinMulti;
 use reqwest;
 use scraper;
+use std::collections::HashMap;
 use std::env;
 use std::fmt;
 use std::fs::OpenOptions;
@@ -30,7 +31,7 @@ struct Config {
 	output_file_path: String,
 	max_page: u32,
 	starting_page: u32,
-	base_url: String,
+	base_urls: Vec<String>,
 }
 
 impl Config {
@@ -45,15 +46,17 @@ impl Config {
 		let _ = OpenOptions::new().write(true).create(true).open(&output_file_path)?;
 
 		// hardcode these for now
-		let max_page: u32 = 2;
+		let max_page: u32 = 101;
 		let starting_page: u32 = 1;
-		let base_url: String = String::from("http://hanzidb.org/character-list/by-frequency?page=");
+		let base_url_freq: String = String::from("http://hanzidb.org/character-list/by-frequency?page=");
+		let base_url_gs: String = String::from("http://hanzidb.org/character-list/general-standard?page=");
+		let base_urls: Vec<String> = vec![base_url_freq, base_url_gs];
 
 		Ok(Config {
 			output_file_path,
 			max_page,
 			starting_page,
-			base_url,
+			base_urls,
 		})
 	}
 }
@@ -118,122 +121,137 @@ fn scrape(config: Config) -> Result<u32> {
 	let selectors = Selectors::new()?;
 	let cc_s2t= OpenCC::new("s2t.json"); // simplified to traditional
 	let cc_t2jp = OpenCC::new("t2jp.json"); // traditional to japanese (shinjitai)
+	let mut hanzi_map: HashMap<String, bool> = HashMap::new();
 
 	// loop through each 'page' of the table
-	for page in config.starting_page..config.max_page {
-		let url = config.base_url.to_owned() + &page.to_string();
-		println!("{}", url);
-		let res = reqwest::blocking::get(url)?.text()?;
-		let html = scraper::Html::parse_document(&res);
-
-		// loop through the rows in each table page. each row corresponds to a character.
-		for row in html.select(&selectors.tr) {
-			let mut data = row.select(&selectors.td);
-			let hanzi: String;
-			let trad: String;
-			let kanji: String;
-			let pinyin: String;
-			let hsk_lvl: u32;
-			let gs_num: u32;
-			let freq: u32;
-
-			// get the character by getting
-			// html structure looks like: <td><a href="some_link">字</a></td>
-			match data.nth(0) {
-				Some(hz_container) => {
-					match hz_container.select(&selectors.a).next() {
-						Some(hz_element) => {
-							match hz_element.text().next() {
-								Some(hz) => { hanzi = hz.to_string(); },
-								None => continue,
-							};
-						},
-						None => continue,
-					};
-				},
-				None => continue,
-			};
-
-			// get the hsk level
-			match data.nth(4) {
-				Some(hsk_container) => {
-					match hsk_container.text().next() {
-						Some(hsk) => { 
-							hsk_lvl = match hsk.parse::<u32>() {
-								Ok(uint) => uint,
-								Err(_) => return Err(anyhow!("Failed string to u32 conversion.")),
-							}; 
-						},
-						None => hsk_lvl = 0, // we want to keep the characters even if they aren't in the hsk. 
-					}
-				},
-				None => continue,
-			};
-
-			// get the general standard #
-			// if the character is not in the gs, I don't want to keep it (for now). 
-			// most likely it is a rarely used variant or traditional character.
-			match data.next() {
-				Some(gs_container) => {
-					match gs_container.text().next() {
-						Some(gs) => {
-							gs_num = match gs.parse::<u32>() {
-								Ok(uint) => uint,
-								Err(_) => return Err(anyhow!("Failed string to u32 conversion.")),
-							};
-						},
-						None => continue,
-					}
-				},
-				None => continue,
-			};
-
-			// get the frequency rank
-			match data.next() {
-				Some(freq_container) => {
-					match freq_container.text().next() {
-						Some(f) => {
-							freq = match f.parse::<u32>() {
-								Ok(uint) => uint,
-								Err(_) => return Err(anyhow!("Failed string to u32 conversion.")),
-							};
-						},
-						None => continue,
-					}
-				},
-				None => continue,
+	for base_url in config.base_urls {
+		for page in config.starting_page..config.max_page {
+			let url = base_url.to_owned() + &page.to_string();
+			println!("{}", url);
+			let res = reqwest::blocking::get(url)?;
+			if !res.status().is_success() {
+				if page > 82 {
+					return Ok(num_lines_written);
+				}	
+				return Err(anyhow!("Failed to get page."));
 			}
+			let html = scraper::Html::parse_document(&res.text()?);
 
-			// get pinyin readings
-			if let Some(x) = hanzi.as_str().to_pinyin_multi().next() {
-				if let Some(p) = x {
-					let readings: Vec<&str> = p.into_iter().map(|x| x.with_tone()).collect();
-					pinyin = readings.join(", ");
+			// loop through the rows in each table page. each row corresponds to a character.
+			for row in html.select(&selectors.tr) {
+				let mut data = row.select(&selectors.td);
+				let hanzi: String;
+				let trad: String;
+				let kanji: String;
+				let pinyin: String;
+				let hsk_lvl: u32;
+				let gs_num: u32;
+				let freq: u32;
+
+				// get the character by getting
+				// html structure looks like: <td><a href="some_link">字</a></td>
+				match data.nth(0) {
+					Some(hz_container) => {
+						match hz_container.select(&selectors.a).next() {
+							Some(hz_element) => {
+								match hz_element.text().next() {
+									Some(hz) => { 
+										hanzi = hz.to_string(); 
+										if hanzi_map.contains_key(&hanzi) { continue; }
+									},
+									None => continue,
+								};
+							},
+							None => continue,
+						};
+					},
+					None => continue,
+				};
+
+				// get the hsk level
+				match data.nth(4) {
+					Some(hsk_container) => {
+						match hsk_container.text().next() {
+							Some(hsk) => { 
+								hsk_lvl = match hsk.parse::<u32>() {
+									Ok(uint) => uint,
+									Err(_) => return Err(anyhow!("Failed string to u32 conversion.")),
+								}; 
+							},
+							None => hsk_lvl = 0, // we want to keep the characters even if they aren't in the hsk. 
+						}
+					},
+					None => continue,
+				};
+
+				// get the general standard #
+				// if the character is not in the gs, I don't want to keep it (for now). 
+				// most likely it is a rarely used variant or traditional character.
+				match data.next() {
+					Some(gs_container) => {
+						match gs_container.text().next() {
+							Some(gs) => {
+								gs_num = match gs.parse::<u32>() {
+									Ok(uint) => uint,
+									Err(_) => return Err(anyhow!("Failed string to u32 conversion.")),
+								};
+							},
+							None => continue,
+						}
+					},
+					None => continue,
+				};
+
+				// get the frequency rank
+				match data.next() {
+					Some(freq_container) => {
+						match freq_container.text().next() {
+							Some(f) => {
+								freq = match f.parse::<u32>() {
+									Ok(uint) => uint,
+									Err(_) => return Err(anyhow!("Failed string to u32 conversion.")),
+								};
+							},
+							None => freq = 0, // if no frequency, still keep the character
+						}
+					},
+					None => continue,
+				}
+
+				// get pinyin readings
+				if let Some(x) = hanzi.as_str().to_pinyin_multi().next() {
+					if let Some(p) = x {
+						let readings: Vec<&str> = p.into_iter().map(|x| x.with_tone()).collect();
+						pinyin = readings.join(", ");
+					} else { return Err(anyhow!("Failed to get pinyin")); }
 				} else { return Err(anyhow!("Failed to get pinyin")); }
-			} else { return Err(anyhow!("Failed to get pinyin")); }
 
-			// get traditional character
-			trad = cc_s2t.convert(&hanzi);
+				// get traditional character
+				trad = cc_s2t.convert(&hanzi);
 
-			// get kanji (shinjitai)
-			kanji = cc_t2jp.convert(&trad);
+				// get kanji (shinjitai)
+				kanji = cc_t2jp.convert(&trad);
 
-			// write data to file
-			let data = HanziRow {
-				hanzi,
-				trad,
-				kanji,
-				pinyin,
-				hsk_lvl,
-				gs_num,
-				freq,
-			};
-			match file.write(format!("{}", data).as_bytes()) {
-				Ok(_) => num_lines_written = num_lines_written + 1,
-				Err(e) => return Err(anyhow!("Got error while writing to file: {}", e)),
+				// write data to file
+				let data = HanziRow {
+					hanzi: hanzi.clone(),
+					trad,
+					kanji,
+					pinyin,
+					hsk_lvl,
+					gs_num,
+					freq,
+				};
+				match file.write(format!("{}", data).as_bytes()) {
+					Ok(_) => {
+						num_lines_written = num_lines_written + 1;
+						hanzi_map.insert(hanzi, true);
+					},
+					Err(e) => return Err(anyhow!("Got error while writing to file: {}", e)),
+				}
 			}
-		}
 
+		}
 	}
 
 	Ok(num_lines_written)
